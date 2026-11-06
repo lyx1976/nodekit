@@ -1,0 +1,5 @@
+{"log":{"loglevel":"warning"},
+ "inbounds":[{"listen":"127.0.0.1","port":__XRAYPORT__,"protocol":"vless",
+   "settings":{"clients":[{"id":"__UUID__"}],"decryption":"none"},
+   "streamSettings":{"network":"ws","wsSettings":{"path":"__WSPATH__"}}}],
+ "outbounds":[{"protocol":"freedom","tag":"direct"}]}
