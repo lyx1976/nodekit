@@ -18,6 +18,55 @@ SUB_TOKEN = os.environ["SUB_TOKEN"]
 XRAY_PORT = int(os.environ.get("XRAY_PORT", "10000"))
 NODE_NAME = os.environ.get("NODE_NAME", "MuseX-Node")
 
+# --- monthly traffic cap (opt-in via TRAFFIC_CAP_GB) ---
+# Counts bytes through the WS tunnel (both directions). When the monthly
+# total reaches the cap, new tunnels are refused and live ones are cut, so
+# the workspace can never drift past the platform's free allowance into
+# billing. Persisted to a small state file; resets each calendar month.
+import json, time
+CAP_GB = float(os.environ.get("TRAFFIC_CAP_GB", "0") or 0)
+CAP_BYTES = int(CAP_GB * 1_000_000_000)
+STATE_FILE = os.environ.get("TRAFFIC_STATE", os.path.join(os.path.dirname(os.path.abspath(__file__)), "traffic_state.json"))
+class _Traffic:
+    def __init__(self):
+        self.lock = threading.Lock()
+        self.month = time.strftime("%Y-%m", time.gmtime())
+        self.total = 0
+        self._dirty = 0
+        try:
+            with open(STATE_FILE) as f:
+                st = json.load(f)
+            if st.get("month") == self.month:
+                self.total = int(st.get("total", 0))
+        except Exception:
+            pass
+    def _roll(self):
+        m = time.strftime("%Y-%m", time.gmtime())
+        if m != self.month:
+            self.month, self.total, self._dirty = m, 0, 0
+            self._flush()
+    def _flush(self):
+        try:
+            with open(STATE_FILE, "w") as f:
+                json.dump({"month": self.month, "total": self.total}, f)
+        except Exception:
+            pass
+    def add(self, n):
+        if CAP_BYTES <= 0: return
+        with self.lock:
+            self._roll()
+            self.total += n
+            self._dirty += n
+            if self._dirty >= 5_000_000:
+                self._dirty = 0
+                self._flush()
+    def exceeded(self):
+        if CAP_BYTES <= 0: return False
+        with self.lock:
+            self._roll()
+            return self.total >= CAP_BYTES
+TRAFFIC = _Traffic()
+
 def vless_link(host):
     p = quote(WS_PATH, safe="")
     return (f"vless://{UUID}@{host}:443?encryption=none&security=tls&type=ws"
@@ -104,6 +153,8 @@ class H(BaseHTTPRequestHandler):
         else:
             self._send(404, "not found")
     def _tunnel(self):
+        if TRAFFIC.exceeded():
+            self._send(503, "service unavailable"); return
         try:
             up = socket.create_connection(("127.0.0.1", XRAY_PORT), timeout=10)
         except OSError:
@@ -127,7 +178,9 @@ class H(BaseHTTPRequestHandler):
                     try: data = s.recv(65536)
                     except OSError: data = b""
                     if not data: done = True; break
+                    TRAFFIC.add(len(data))
                     (up if s is conn else conn).sendall(data)
+                    if TRAFFIC.exceeded(): break
                 if done: break
         finally:
             try: up.close()
